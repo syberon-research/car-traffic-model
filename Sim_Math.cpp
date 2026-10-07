@@ -1,11 +1,11 @@
-
-
 // author: Programmer Intern Jordan
 
 #include <random>
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <cmath>
 #include <sqlite3.h>
 
 #include "Sim_Math.h"
@@ -28,8 +28,6 @@ double power(double a, int b){
 		return 0;
 	}
 
-	// If b is negative, we flip the sign now and then later
-	// we return 1.0 divided by the "normally" computed answer for a^b
 	bool needs_inversion = false;
 	if(b < 0){
 		needs_inversion = true;
@@ -46,19 +44,18 @@ double power(double a, int b){
 }
 
 
-// https://www.geeksforgeeks.org/dsa/fast-exponention-using-bit-manipulation/
+int poisson(int lambda){
+	// Knuth's algorithm for Poisson random numbers.
+	// Use the standard exponential function instead of
+	// recursively calculating e^(-lambda).
+	double L = std::exp(-lambda);
 
-
-
-int poisson(int lambda){ // lambda is the technical term, this value is the desired average
-	// Knuth's algorithm for Poisson random numbers
-	double L = power(e, -lambda);
 	int k = 0;
 	double p = 1.0;
 
 	while(p > L){
 		k = k + 1;
-		double u = (double)rand() / RAND_MAX; // gives a uniformly random number between 0 and 1
+		double u = (double)rand() / RAND_MAX;
 		p *= u;
 	}
 
@@ -76,15 +73,18 @@ int binomial(int n, double p){
 	// p gives the probability of success, in this case the probability an individual car exits
 
 	int count = 0;
-	for (int i = 0; i < n; i++){ // for each car
-		double u = (double)rand() / RAND_MAX; // generate a uniform random number between 0 and 1
-		if(u < p){ // if that random number is less than the probability of success, the car leaves
-			count = count + 1; // count the cars that leave
+
+	for (int i = 0; i < n; i++){
+		double u = (double)rand() / RAND_MAX;
+
+		if(u < p){
+			count = count + 1;
 		}
 	}
 	
-	return count; // return the number of cars that left
+	return count;
 }
+
 
 int percentage(int portion, int overall){
 	// returns portion / overall as a percentage
@@ -106,6 +106,7 @@ bool crash_occurs(double prob_of_crash_today){
 int day_of_week_code(TimeCode cur_time){
 	int cur_hour = cur_time.GetHours();
 	cur_hour = cur_hour % 168;
+
 	if(cur_hour <= 24){
 		return 0; // Sunday
 	} else if(cur_hour <= 48){
@@ -123,6 +124,7 @@ int day_of_week_code(TimeCode cur_time){
 	}
 }
 
+
 std::string day_of_week_name(int code){
 	switch(code){
 		case 0: return "Sunday";
@@ -133,107 +135,104 @@ std::string day_of_week_name(int code){
 		case 5: return "Friday";
 		case 6: return "Saturday";
 		default: 
-			throw std::invalid_argument("Invalid day of week code: " + std::to_string(code));
+			throw std::invalid_argument(
+				"Invalid day of week code: " + std::to_string(code)
+			);
 	}
 }
 
 
 int prepare(sqlite3* db, const char* query, sqlite3_stmt** stmt){
-	int rc = sqlite3_prepare_v2(db, query, -1, stmt, 0); // (db, query, ?, response/answer, ?)
+	int rc = sqlite3_prepare_v2(db, query, -1, stmt, 0);
+
 	if(rc != SQLITE_OK){
 		sqlite3_close(db);
 		throw std::runtime_error("Could not prepare database query.");
 	}
+
 	return rc;
 }
 
 
 // insanely slow BUT IDK why?!
 std::unordered_map<std::string, double> build_crash_prob_map(){
-	// Create a hashmap like
-	// {Fri: 0.50448,
-	// Wed: 0.324194,
-	// Thu: 0.410394,
-	// Tue: 0.239068,
-	// Mon: 0.147312,
-	// Sat: 0.59319,
-	// Sun: 0.0645161}
-	// The key is a day of the week (actually a number like 2 for Tuesday)
-	// The value is the probability of a crash on that day.  Based on data from the database
-	// the probability of a crash on e.g., Tuesday is  (num crashes on tuesdays) / (total num crashes)
+	sqlite3* db;
 
+	int rc = sqlite3_open("CRASH_LANCASTER_2024.db", &db);
 
-
-			sqlite3* db;
-int rc = sqlite3_open("CRASH_LANCASTER_2024.db", &db); // note c_str() converts to a const char* which is the string type in C
 	if(rc){
-		throw std::invalid_argument("Could not open CRASH_LANCASTER_2024.db database file!");
+		throw std::invalid_argument(
+			"Could not open CRASH_LANCASTER_2024.db database file!"
+		);
 	}
 
 
-	// Step 1. Count all stuff (row things?) from DB
-	const char* first_sql_query = "SELECT COUNT(*) FROM incidents";  double total_crashes = 0.0;
+	// Step 1. Count all crashes from DB
+	const char* first_sql_query = "SELECT COUNT(*) FROM incidents";
+
+	double total_crashes = 0.0;
+
 	sqlite3_stmt* stmt;
+
 	rc = prepare(db, first_sql_query, &stmt);
+
 	if(rc == SQLITE_OK){
+		rc = sqlite3_step(stmt);
 
-			rc = sqlite3_step(stmt);
-
-				if(rc == SQLITE_ROW){
-
-					total_crashes = static_cast<double>(sqlite3_column_int(stmt, 0));
-					//std::cout << "total_crashes: " << total_crashes << std::endl;
-}
-}
-
+		if(rc == SQLITE_ROW){
+			total_crashes = static_cast<double>(
+				sqlite3_column_int(stmt, 0)
+			);
+		}
+	}
 
 
-	// Step 3. Get al accidonts when there's once car involved
-	const char* second_sql_query = "SELECT CRN FROM incidents WHERE AUTOMOBILE_COUNT != 0;";
+	// Step 2. Get all accidents where there's at least one car involved
+	const char* second_sql_query =
+		"SELECT CRN FROM incidents WHERE AUTOMOBILE_COUNT != 0;";
+
 	rc = prepare(db, second_sql_query, &stmt);
 
-	std::vector<int> CRNs; // Crash Record Number, like an ID for each crash
-			while((rc = sqlite3_step(stmt)) == SQLITE_ROW){const int crn = sqlite3_column_int(stmt, 0); 
-				CRNs.push_back(crn);
-				//cout << "CRn   : " << crn << endl;
-			}
+	std::vector<int> CRNs;
 
-	if(rc != SQLITE_DONE)
-	{
+	while((rc = sqlite3_step(stmt)) == SQLITE_ROW){
+		const int crn = sqlite3_column_int(stmt, 0);
+		CRNs.push_back(crn);
+	}
+
+	if(rc != SQLITE_DONE){
 		std::cout << "Error: " << sqlite3_errmsg(db) << std::endl;
 		throw std::runtime_error("Error iterating over DB query results.");
 	}
 
 
-
-	// Step 3. Count all adscrashes on each dOW to build the map
+	// Step 3. Count crashes on each day of week
 	std::unordered_map<std::string, double> crash_prob_map;
 	
-	for(int dow = 1; dow < 8; dow++){ // iterate over each day
-	int count = 0;
-	for(size_t i = 0; i < CRNs.size(); i++){ // count the number of crashes from the result that are dow
-				const char* third_sql_query = "SELECT * FROM incidents WHERE CRN = ? AND DAY_OF_WEEK = ?;";
+	for(int dow = 1; dow < 8; dow++){
+		int count = 0;
+
+		for(size_t i = 0; i < CRNs.size(); i++){
+			const char* third_sql_query =
+				"SELECT * FROM incidents WHERE CRN = ? AND DAY_OF_WEEK = ?;";
+
 			rc = prepare(db, third_sql_query, &stmt);
 
-// https://sqlite.org/c3ref/bind_blob.html
-sqlite3_bind_int64(stmt, 1, CRNs.at(i)); // "bind", put CRN into query for first question mark
-sqlite3_bind_int(stmt, 2, dow); // "bind", put day of week code into query for second question mark
+			sqlite3_bind_int64(stmt, 1, CRNs.at(i));
+			sqlite3_bind_int(stmt, 2, dow);
 			
 			while((rc = sqlite3_step(stmt)) == SQLITE_ROW){
-			//const int injury_count = sqlite3_column_int(stmt, 36);
-			//std::cout << "CRN: " << CRNs.at(i) << "  injury count: "  << injury_count << std::endl;
-			count++;}
-
-			// For the database it's 1-7 for Sunday - Saturday, but for the function it's 0-6
+				count++;
+			}
 		}
-		//std::cout << "Day: " << day_of_week_name(dow-1) << " count : " << count << std::endl;
-	crash_prob_map[day_of_week_name(dow-1)] += static_cast<double>(count) / total_crashes; // add the probability of crash on this day
+
+		crash_prob_map[day_of_week_name(dow-1)] +=
+			static_cast<double>(count) / total_crashes;
+	}
+
+
+	sqlite3_finalize(stmt);
+	sqlite3_close(db);
+
+	return crash_prob_map;
 }
-
-sqlite3_finalize(stmt);
-sqlite3_close(db);
-
-return crash_prob_map;
-}
-
-

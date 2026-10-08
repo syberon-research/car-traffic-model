@@ -7,6 +7,7 @@
 #include <unordered_map>
 #include <cmath>
 #include <sqlite3.h>
+#include <iostream>
 
 #include "Sim_Math.h"
 
@@ -19,6 +20,7 @@ double power_recursive(double a, int b){
 	return tmp;
 }
 
+
 double power(double a, int b){
 	if(b == 0){
 		return 1;
@@ -29,6 +31,7 @@ double power(double a, int b){
 	}
 
 	bool needs_inversion = false;
+
 	if(b < 0){
 		needs_inversion = true;
 		b = -b;
@@ -154,8 +157,8 @@ int prepare(sqlite3* db, const char* query, sqlite3_stmt** stmt){
 }
 
 
-// insanely slow BUT IDK why?!
 std::unordered_map<std::string, double> build_crash_prob_map(){
+
 	sqlite3* db;
 
 	int rc = sqlite3_open("CRASH_LANCASTER_2024.db", &db);
@@ -167,72 +170,112 @@ std::unordered_map<std::string, double> build_crash_prob_map(){
 	}
 
 
-	// Step 1. Count all crashes from DB
-	const char* first_sql_query = "SELECT COUNT(*) FROM incidents";
+	/*
+	 * Get the total number of crashes.
+	 *
+	 * This is still one simple database query.
+	 */
+	const char* total_sql =
+		"SELECT COUNT(*) FROM incidents;";
 
 	double total_crashes = 0.0;
 
-	sqlite3_stmt* stmt;
+	sqlite3_stmt* stmt = nullptr;
 
-	rc = prepare(db, first_sql_query, &stmt);
+	rc = prepare(db, total_sql, &stmt);
 
 	if(rc == SQLITE_OK){
+
 		rc = sqlite3_step(stmt);
 
 		if(rc == SQLITE_ROW){
-			total_crashes = static_cast<double>(
-				sqlite3_column_int(stmt, 0)
-			);
+
+			total_crashes =
+				static_cast<double>(
+					sqlite3_column_int(stmt, 0)
+				);
 		}
 	}
 
+	sqlite3_finalize(stmt);
 
-	// Step 2. Get all accidents where there's at least one car involved
-	const char* second_sql_query =
-		"SELECT CRN FROM incidents WHERE AUTOMOBILE_COUNT != 0;";
 
-	rc = prepare(db, second_sql_query, &stmt);
+	/*
+	 * The original code did a database query for every CRN
+	 * for every day of the week.
+	 *
+	 * Instead, this single query reproduces the same counting:
+	 *
+	 * 1. Find CRNs belonging to incidents with automobiles.
+	 * 2. Match those CRNs back to the incidents table.
+	 * 3. Count the matching incidents grouped by day of week.
+	 *
+	 * The join preserves duplicate CRNs in the same way as
+	 * the original nested loops.
+	 */
+	const char* grouped_sql =
+		"SELECT i.DAY_OF_WEEK, COUNT(*) "
+		"FROM incidents AS i "
+		"INNER JOIN ("
+		"    SELECT CRN "
+		"    FROM incidents "
+		"    WHERE AUTOMOBILE_COUNT != 0"
+		") AS c "
+		"ON i.CRN = c.CRN "
+		"GROUP BY i.DAY_OF_WEEK;";
 
-	std::vector<int> CRNs;
+
+	std::vector<int> day_counts(7, 0);
+
+	rc = prepare(db, grouped_sql, &stmt);
 
 	while((rc = sqlite3_step(stmt)) == SQLITE_ROW){
-		const int crn = sqlite3_column_int(stmt, 0);
-		CRNs.push_back(crn);
+
+		int day =
+			sqlite3_column_int(stmt, 0);
+
+		int count =
+			sqlite3_column_int(stmt, 1);
+
+		if(day >= 1 && day <= 7){
+
+			day_counts[day - 1] = count;
+		}
 	}
+
 
 	if(rc != SQLITE_DONE){
-		std::cout << "Error: " << sqlite3_errmsg(db) << std::endl;
-		throw std::runtime_error("Error iterating over DB query results.");
-	}
 
+		std::cout
+			<< "Error: "
+			<< sqlite3_errmsg(db)
+			<< std::endl;
 
-	// Step 3. Count crashes on each day of week
-	std::unordered_map<std::string, double> crash_prob_map;
-	
-	for(int dow = 1; dow < 8; dow++){
-		int count = 0;
+		sqlite3_finalize(stmt);
+		sqlite3_close(db);
 
-		for(size_t i = 0; i < CRNs.size(); i++){
-			const char* third_sql_query =
-				"SELECT * FROM incidents WHERE CRN = ? AND DAY_OF_WEEK = ?;";
-
-			rc = prepare(db, third_sql_query, &stmt);
-
-			sqlite3_bind_int64(stmt, 1, CRNs.at(i));
-			sqlite3_bind_int(stmt, 2, dow);
-			
-			while((rc = sqlite3_step(stmt)) == SQLITE_ROW){
-				count++;
-			}
-		}
-
-		crash_prob_map[day_of_week_name(dow-1)] +=
-			static_cast<double>(count) / total_crashes;
+		throw std::runtime_error(
+			"Error iterating over DB query results."
+		);
 	}
 
 
 	sqlite3_finalize(stmt);
 	sqlite3_close(db);
+
+
+	/*
+	 * Build the same probability map as before.
+	 */
+	std::unordered_map<std::string, double> crash_prob_map;
+
+	for(int dow = 0; dow < 7; dow++){
+
+		crash_prob_map[day_of_week_name(dow)] =
+			static_cast<double>(day_counts[dow])
+			/ total_crashes;
+	}
+
 
 	return crash_prob_map;
 }
